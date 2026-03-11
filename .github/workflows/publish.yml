@@ -1,0 +1,137 @@
+name: publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Upstream typos version to publish, for example v1.44.0
+        required: false
+        type: string
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-dockerhub
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: andreyfomin/typos
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      version_no_v: ${{ steps.release.outputs.version_no_v }}
+      major: ${{ steps.release.outputs.major }}
+      minor: ${{ steps.release.outputs.minor }}
+      patch: ${{ steps.release.outputs.patch }}
+      release_url: ${{ steps.release.outputs.release_url }}
+      floating_tags_enabled: ${{ steps.release.outputs.floating_tags_enabled }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Resolve upstream release
+        id: release
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          args=()
+          if [ -n "$INPUT_VERSION" ]; then
+            args+=(--version "$INPUT_VERSION")
+          fi
+          python3 scripts/typos_release.py metadata "${args[@]}" --github-output "$GITHUB_OUTPUT"
+
+  publish:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Check if version already exists
+        id: existing
+        env:
+          VERSION: ${{ needs.resolve.outputs.version_no_v }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        run: |
+          if docker buildx imagetools inspect "docker.io/${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1; then
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            echo "Image ${IMAGE_NAME}:${VERSION} already exists on Docker Hub. Skipping publish."
+          else
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare image metadata
+        id: meta
+        if: steps.existing.outputs.should_publish == 'true'
+        uses: docker/metadata-action@v6
+        with:
+          images: docker.io/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.resolve.outputs.version_no_v }}
+            type=raw,value=${{ needs.resolve.outputs.major }}.${{ needs.resolve.outputs.minor }},enable=${{ needs.resolve.outputs.floating_tags_enabled }}
+            type=raw,value=${{ needs.resolve.outputs.major }},enable=${{ needs.resolve.outputs.floating_tags_enabled }}
+            type=raw,value=latest,enable=${{ needs.resolve.outputs.floating_tags_enabled }}
+          labels: |
+            org.opencontainers.image.title=typos
+            org.opencontainers.image.description=Container image for the crate-ci/typos CLI
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=https://hub.docker.com/r/${{ env.IMAGE_NAME }}
+            org.opencontainers.image.vendor=Andrey Fomin
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version_no_v }}
+            io.github.crate-ci.typos.release=${{ needs.resolve.outputs.release_url }}
+            io.github.crate-ci.typos.version=${{ needs.resolve.outputs.version }}
+
+      - name: Build and push image
+        if: steps.existing.outputs.should_publish == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            TYPOS_VERSION=${{ needs.resolve.outputs.version }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Write job summary
+        env:
+          SHOULD_PUBLISH: ${{ steps.existing.outputs.should_publish }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          RELEASE_URL: ${{ needs.resolve.outputs.release_url }}
+        run: |
+          {
+            echo "## typos Docker publish"
+            echo
+            echo "- Upstream release: [${VERSION}](${RELEASE_URL})"
+            echo "- Docker image: \`${IMAGE_NAME}\`"
+            if [ "$SHOULD_PUBLISH" = "true" ]; then
+              echo "- Result: published tags for ${VERSION}"
+            else
+              echo "- Result: skipped because ${IMAGE_NAME}:${VERSION#v} already exists"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
