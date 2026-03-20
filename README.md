@@ -6,6 +6,8 @@
 
 Run [`crate-ci/typos`](https://github.com/crate-ci/typos) with Docker, without installing the binary on your machine.
 
+Test PR for commit message validation.
+
 Docker Hub: [`andreyfomin/typos`](https://hub.docker.com/r/andreyfomin/typos)
 
 ## Quick start
