@@ -11,6 +11,17 @@ permissions:
   contents: read
 
 jobs:
+  commit-message:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate commit messages
+        uses: andrey-fomin/ccval@v0
+
   smoke-build:
     runs-on: ubuntu-latest
     steps:
